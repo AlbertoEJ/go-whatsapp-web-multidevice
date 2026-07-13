@@ -7,7 +7,7 @@ import (
 )
 
 var (
-	AppVersion             = "v8.10.0"
+	AppVersion             = "v8.11.0"
 	AppPort                = "3000"
 	AppHost                = "0.0.0.0"
 	AppDebug               = false
@@ -109,6 +109,13 @@ var (
 	// Optional shared secret for incoming Chatwoot webhooks. When empty, inbound
 	// webhook requests remain unauthenticated for backward compatibility.
 	ChatwootWebhookSecret = ""
+
+	// ChatwootAllowedHosts optionally restricts which Chatwoot hosts a
+	// per-device config may point at. When non-empty, a config's chatwoot_url
+	// host must match one of these entries (exact, case-insensitive). It hardens
+	// the SSRF surface introduced by operator-supplied per-device URLs in
+	// deployments where authenticated API users are not fully trusted.
+	ChatwootAllowedHosts []string
 
 	// Chatwoot conversation handling. ChatwootReopenConversation reuses (and
 	// reopens) a resolved conversation for a returning contact instead of
