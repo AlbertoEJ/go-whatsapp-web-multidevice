@@ -3,7 +3,7 @@ package saas
 import (
 	"crypto/subtle"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 )
 
 // InboundAuthMiddleware gates the bot's /send/* endpoints against the
@@ -16,7 +16,7 @@ import (
 // Constant-time compare avoids the timing-oracle vulnerability that
 // substr or `==` checks would expose.
 func InboundAuthMiddleware() fiber.Handler {
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		cfg := Load()
 		if cfg.InboundSecret == "" {
 			return c.Next()
