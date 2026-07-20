@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 )
 
 // lastMessageAtUnix is updated whenever a message-bearing webhook
@@ -24,7 +24,7 @@ func RecordInbound() {
 // connected"); /healthz answers "is this bot integrated with the SaaS
 // and recently active".
 func HealthHandler() fiber.Handler {
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		cfg := Load()
 
 		body := fiber.Map{

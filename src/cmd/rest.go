@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,19 +13,19 @@ import (
 
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/config"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/chatwoot"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/uiasset"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/infrastructure/whatsapp"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/internal/saas"
+	"github.com/aldinokemal/go-whatsapp-web-multidevice/pkg/utils"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest/helpers"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/rest/middleware"
 	"github.com/aldinokemal/go-whatsapp-web-multidevice/ui/websocket"
-	"github.com/dustin/go-humanize"
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/basicauth"
-	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/filesystem"
-	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/template/html/v2"
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/basicauth"
+	"github.com/gofiber/fiber/v3/middleware/cors"
+	"github.com/gofiber/fiber/v3/middleware/logger"
+	"github.com/gofiber/fiber/v3/middleware/static"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -41,47 +42,30 @@ func init() {
 	rootCmd.AddCommand(restCmd)
 }
 func restServer(_ *cobra.Command, _ []string) {
-	engine := html.NewFileSystem(http.FS(EmbedIndex), ".html")
-	engine.AddFunc("isEnableBasicAuth", func(token any) bool {
-		return token != nil
-	})
 	fiberConfig := fiber.Config{
-		Views:                   engine,
-		EnableTrustedProxyCheck: true,
-		BodyLimit:               int(config.WhatsappSettingMaxVideoSize),
-		Network:                 "tcp",
+		TrustProxy: true,
+		BodyLimit:  int(config.WhatsappSettingMaxVideoSize),
 	}
 
 	// Configure proxy settings if trusted proxies are specified
 	if len(config.AppTrustedProxies) > 0 {
-		fiberConfig.TrustedProxies = config.AppTrustedProxies
+		fiberConfig.TrustProxyConfig = fiber.TrustProxyConfig{Proxies: config.AppTrustedProxies}
 		fiberConfig.ProxyHeader = fiber.HeaderXForwardedHost
 	}
 
 	app := fiber.New(fiberConfig)
 
-	app.Static(config.AppBasePath+"/statics", "./statics")
-	app.Use(config.AppBasePath+"/components", filesystem.New(filesystem.Config{
-		Root:       http.FS(EmbedViews),
-		PathPrefix: "views/components",
-		Browse:     true,
-	}))
-	app.Use(config.AppBasePath+"/assets", filesystem.New(filesystem.Config{
-		Root:       http.FS(EmbedViews),
-		PathPrefix: "views/assets",
-		Browse:     true,
-	}))
+	// CORS must precede the static routes so cross-origin UIs (gowa-ui) can
+	// fetch media under /statics and authenticate with the headers below.
+	app.Use(newCORSMiddleware())
+
+	app.Use(config.AppBasePath+"/statics", static.New("./statics"))
 
 	app.Use(middleware.Recovery())
 	app.Use(middleware.RequestTimeout(middleware.DefaultRequestTimeout))
-	app.Use(middleware.BasicAuth())
 	if config.AppDebug {
 		app.Use(logger.New())
 	}
-	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept",
-	}))
 
 	// Device manager - needed for chatwoot webhook and health check
 	dm := whatsapp.GetDeviceManager()
@@ -89,7 +73,7 @@ func restServer(_ *cobra.Command, _ []string) {
 	// Health check endpoint (public, no auth)
 	// Registered at root path (ignoring AppBasePath) to ensure fixed availability
 	// for infrastructure health probes (Kubernetes liveness/readiness, Docker healthcheck, etc.)
-	app.Get("/health", func(c *fiber.Ctx) error {
+	app.Get("/health", func(c fiber.Ctx) error {
 		if dm != nil && dm.IsHealthy() {
 			return c.SendString("OK")
 		}
@@ -136,9 +120,8 @@ func restServer(_ *cobra.Command, _ []string) {
 			account[ba[0]] = ba[1]
 		}
 
-		app.Use(basicauth.New(basicauth.Config{
-			Users: account,
-		}))
+		app.Use(middleware.WebsocketQueryAuth())
+		app.Use(newBasicAuthMiddleware(account))
 	}
 
 	// Create base path group or use app directly
@@ -162,6 +145,9 @@ func restServer(_ *cobra.Command, _ []string) {
 	// Device management routes (no device_id required)
 	rest.InitRestDevice(apiGroup, deviceUsecase)
 
+	// App info (version, limits) for standalone UIs; no device required
+	rest.InitRestAppInfo(apiGroup)
+
 	// Device-scoped operations (header-based)
 	headerDeviceGroup := apiGroup.Group("", middleware.DeviceMiddleware(dm))
 	// SaaS_Construction integration: when SAAS_INBOUND_SECRET is set,
@@ -181,16 +167,12 @@ func restServer(_ *cobra.Command, _ []string) {
 		apiGroup.Delete("/devices/:device_id/chatwoot/config", chatwootHandler.DeleteChatwootConfig)
 	}
 
-	apiGroup.Get("/", func(c *fiber.Ctx) error {
-		return c.Render("views/index", fiber.Map{
-			"AppHost":        fmt.Sprintf("%s://%s", c.Protocol(), c.Hostname()),
-			"AppVersion":     config.AppVersion,
-			"AppBasePath":    config.AppBasePath,
-			"BasicAuthToken": c.UserContext().Value(middleware.AuthorizationValue("BASIC_AUTH")),
-			"MaxFileSize":    humanize.Bytes(uint64(config.WhatsappSettingMaxFileSize)),
-			"MaxVideoSize":   humanize.Bytes(uint64(config.WhatsappSettingMaxVideoSize)),
-		})
-	})
+	// Dashboard: gowa-ui is a separate project released as one HTML file;
+	// serve the runtime-downloaded copy at "/" (behind basic auth like the
+	// rest of the API surface).
+	uiCtx, uiCancel := context.WithCancel(context.Background())
+	defer uiCancel()
+	registerUIRoute(apiGroup, uiCtx)
 
 	go websocket.RunHub()
 
@@ -209,7 +191,7 @@ func restServer(_ *cobra.Command, _ []string) {
 	// the chat storage DB connection.
 	listenErr := make(chan error, 1)
 	go func() {
-		listenErr <- app.Listen(config.AppHost + ":" + config.AppPort)
+		listenErr <- app.Listen(config.AppHost+":"+config.AppPort, fiber.ListenConfig{ListenerNetwork: "tcp"})
 	}()
 
 	sigCh := make(chan os.Signal, 1)
@@ -238,4 +220,78 @@ func restServer(_ *cobra.Command, _ []string) {
 			}
 		}
 	}
+}
+
+func registerUIRoute(apiGroup fiber.Router, ctx context.Context) {
+	if !config.AppUIEnabled {
+		apiGroup.Get("/", func(c fiber.Ctx) error {
+			return c.JSON(utils.ResponseData{
+				Status:  200,
+				Code:    "SUCCESS",
+				Message: fmt.Sprintf("gowa %s — UI disabled", config.AppVersion),
+			})
+		})
+		return
+	}
+
+	uiManager := uiasset.New(uiasset.Config{
+		Repo:         config.AppUIRepo,
+		AssetName:    config.AppUIAssetName,
+		CacheDir:     config.PathUICache,
+		GithubToken:  config.AppUIGithubToken,
+		Interval:     config.AppUIUpdateInterval,
+		PinnedSHA256: config.AppUIAssetSHA256,
+	})
+	if err := uiManager.LoadCache(); err != nil {
+		logrus.Infof("[UI_ASSET] no cached dashboard yet: %v", err)
+	}
+	if config.AppUIAutoUpdate {
+		go func() {
+			if err := uiManager.EnsureLatest(ctx); err != nil {
+				logrus.Warnf("[UI_ASSET] initial dashboard download failed: %v", err)
+			}
+		}()
+		go uiManager.StartAutoUpdate(ctx)
+	}
+
+	apiGroup.Get("/", func(c fiber.Ctx) error {
+		content, etag, ok := uiManager.Content()
+		if !ok {
+			c.Type("html")
+			return c.Send(uiasset.FallbackHTML(config.AppVersion, config.AppUIRepo))
+		}
+		quoted := `"` + etag + `"`
+		c.Set(fiber.HeaderCacheControl, "no-cache")
+		c.Set(fiber.HeaderETag, quoted)
+		if c.Get(fiber.HeaderIfNoneMatch) == quoted {
+			return c.SendStatus(fiber.StatusNotModified)
+		}
+		c.Type("html")
+		return c.Send(content)
+	})
+}
+
+func newCORSMiddleware() fiber.Handler {
+	origins := []string{"*"}
+	if len(config.AppCORSAllowedOrigins) > 0 {
+		origins = config.AppCORSAllowedOrigins
+	}
+	return cors.New(cors.Config{
+		AllowOrigins: origins,
+		AllowMethods: []string{"GET", "POST", "HEAD", "PUT", "PATCH", "DELETE"},
+		AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization", middleware.DeviceIDHeader},
+	})
+}
+
+func newBasicAuthMiddleware(accounts map[string]string) fiber.Handler {
+	return basicauth.New(basicauth.Config{
+		Authorizer: func(username, password string, _ fiber.Ctx) bool {
+			expectedPassword, ok := accounts[username]
+			if !ok {
+				return false
+			}
+
+			return subtle.ConstantTimeCompare([]byte(password), []byte(expectedPassword)) == 1
+		},
+	})
 }
