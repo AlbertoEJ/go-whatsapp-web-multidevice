@@ -2632,6 +2632,67 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorInternalServer'
+  /chat/{chat_jid}/history:
+    post:
+      operationId: requestChatHistory
+      tags:
+        - chat
+      summary: Request older chat history from the phone
+      description: >-
+        Asks the phone for older messages of a chat on demand (what WhatsApp
+        Web does when you scroll up / "load older messages"). The request is
+        anchored at the oldest message currently stored locally for that
+        chat, so the chat must already have at least one stored message. The
+        phone answers asynchronously with a history sync event that gets
+        persisted into chat storage; this endpoint only confirms the request
+        was sent, it does not return the older messages directly.
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - in: path
+          name: chat_jid
+          schema:
+            type: string
+          required: true
+          description: Chat JID (e.g., phone@s.whatsapp.net for individual or groupid@g.us for group). Percent-encoded values (e.g., groupid%40g.us) are accepted.
+          example: '6289685028129@s.whatsapp.net'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                count:
+                  type: integer
+                  default: 50
+                  minimum: 0
+                  maximum: 500
+                  example: 50
+                  description: Number of older messages to request from the phone. Omit it, or send 0, to use the default of 50.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestChatHistoryResponse'
+        '400':
+          description: Bad Request (e.g. missing chat_jid, count out of range, or chat has no stored messages to anchor on)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBadRequest'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorUnauthorized'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorInternalServer'
   /chat/{chat_jid}/pin:
     post:
       operationId: pinChat
@@ -3657,6 +3718,54 @@ paths:
                 $ref: '#/components/schemas/ErrorBadRequest'
         '500':
           description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorInternalServer'
+
+  /newsletter/messages/{server_id}/download:
+    get:
+      operationId: downloadNewsletterMessageMedia
+      tags:
+        - newsletter
+      summary: Download media from a newsletter message
+      description: |
+        Fetches one newsletter message directly from WhatsApp by server ID,
+        downloads its media to the server's statics directory, and returns the
+        saved file metadata and public URL. Supported media types are images,
+        videos, video notes, audio, documents, and stickers.
+      parameters:
+        - $ref: '#/components/parameters/DeviceIdHeader'
+        - name: server_id
+          in: path
+          required: true
+          description: Newsletter message server ID returned by GET /newsletter/messages
+          schema:
+            type: integer
+            minimum: 1
+          example: 8872
+        - name: newsletter_id
+          in: query
+          required: true
+          description: Newsletter JID containing the message
+          schema:
+            type: string
+          example: '120363024512399999@newsletter'
+      responses:
+        '200':
+          description: Media downloaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewsletterMediaDownloadResponse'
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBadRequest'
+        '500':
+          description: Message lookup or media download failed
           content:
             application/json:
               schema:
@@ -4990,6 +5099,52 @@ components:
         text:
           type: string
           example: "Hello from the channel!"
+    NewsletterMediaDownloadResponse:
+      type: object
+      properties:
+        status:
+          type: integer
+          example: 200
+        code:
+          type: string
+          example: SUCCESS
+        message:
+          type: string
+          example: Media downloaded successfully
+        results:
+          type: object
+          properties:
+            server_id:
+              type: integer
+              example: 8872
+            message_id:
+              type: string
+              example: ACBD7F85529AAD63FAF376F622351D14
+            status:
+              type: string
+              example: Media downloaded successfully to statics/media/120363024512399999/2026-08-28/image.jpg
+            media_type:
+              type: string
+              enum: [image, video, video_note, audio, document, sticker]
+              example: image
+            mime_type:
+              type: string
+              example: image/jpeg
+            filename:
+              type: string
+              example: image.jpg
+            file_path:
+              type: string
+              description: Local server path where the downloaded media was saved
+              example: statics/media/120363024512399999/2026-08-28/image.jpg
+            file_url:
+              type: string
+              description: Public URL for the saved media file
+              example: http://localhost:3000/statics/media/120363024512399999/2026-08-28/image.jpg
+            file_size:
+              type: integer
+              format: int64
+              example: 524288
     MyListContactsResponse:
       type: object
       properties:
@@ -5337,6 +5492,37 @@ components:
           example: '2024-01-15T10:31:00Z'
           description: When the reaction was received
 
+    RequestChatHistoryResponse:
+      type: object
+      properties:
+        status:
+          type: integer
+          example: 200
+        code:
+          type: string
+          example: SUCCESS
+        message:
+          type: string
+          example: History sync requested successfully
+        results:
+          type: object
+          properties:
+            status:
+              type: string
+              example: requested
+            chat_jid:
+              type: string
+              example: '6289685028129@s.whatsapp.net'
+            requested_count:
+              type: integer
+              example: 50
+            anchor_message_id:
+              type: string
+              example: '3EB0C767D82B0A0D1234'
+            anchor_timestamp:
+              type: string
+              format: date-time
+              example: '2026-05-16T08:00:00Z'
     PinChatResponse:
       type: object
       properties:
